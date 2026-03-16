@@ -113,6 +113,7 @@ def _resolve_handler(
     HTTPException
         404 when a ``model_id`` is provided but not found in the
         registry.
+
     """
     registry = getattr(raw_request.app.state, "registry", None)
     if registry is not None and model_id is not None:
@@ -132,6 +133,57 @@ def _resolve_handler(
 
     # Fallback: single-handler mode
     return getattr(raw_request.app.state, "handler", None)
+
+
+def _normalize_chat_response_model(
+    request: ChatCompletionRequest,
+    handler: Any,
+    *,
+    used_legacy_chat_fallback: bool,
+) -> None:
+    """Normalize the chat response model after handler resolution.
+
+    Chat requests normalize omitted ``model`` to ``Config.TEXT_MODEL``
+    during validation. In multi-model mode we preserve backward
+    compatibility for omitted requests by resolving them against
+    ``app.state.handler`` when the field was not explicitly supplied.
+    ``model_fields_set`` preserves that distinction, so explicit
+    ``model="local-text-model"`` requests still behave like normal model
+    lookups and can return ``model_not_found``.
+
+    After an omitted-model fallback resolves to a concrete handler, chat
+    payloads should report the resolved handler id instead of the legacy
+    alias. Single-model requests keep the alias.
+    """
+    if used_legacy_chat_fallback:
+        request.model = getattr(handler, "model_id", Config.TEXT_MODEL)
+
+
+def _should_use_legacy_chat_fallback(
+    raw_request: Request,
+    request: ChatCompletionRequest,
+) -> bool:
+    """Return whether chat should use omitted-model fallback routing.
+
+    The backward-compatible fallback only applies when the ``model``
+    field was omitted, the request normalized to ``Config.TEXT_MODEL``,
+    the alias is not registered in multi-model mode, and
+    ``app.state.handler`` is available as the compatibility fallback.
+    """
+
+    if request.model != Config.TEXT_MODEL or "model" in request.model_fields_set:
+        return False
+
+    registry = getattr(raw_request.app.state, "registry", None)
+    if registry is None:
+        return False
+
+    try:
+        registry.get_handler(Config.TEXT_MODEL)
+    except KeyError:
+        return getattr(raw_request.app.state, "handler", None) is not None
+
+    return False
 
 
 # =============================================================================
@@ -373,7 +425,11 @@ async def chat_completions(
     """Handle chat completion requests."""
     if not request.model:
         request.model = Config.TEXT_MODEL
-    handler = _resolve_handler(raw_request, model_id=request.model)
+    used_legacy_chat_fallback = _should_use_legacy_chat_fallback(raw_request, request)
+    handler = _resolve_handler(
+        raw_request,
+        model_id=None if used_legacy_chat_fallback else request.model,
+    )
     if handler is None:
         return JSONResponse(
             content=create_error_response(
@@ -383,6 +439,11 @@ async def chat_completions(
             ),
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
         )
+    _normalize_chat_response_model(
+        request,
+        handler,
+        used_legacy_chat_fallback=used_legacy_chat_fallback,
+    )
     request = refine_chat_completion_request(request, handler)
 
     handler_type = _get_handler_type(handler)
@@ -418,7 +479,6 @@ async def chat_completions(
         return JSONResponse(
             content=create_error_response(str(e)), status_code=HTTPStatus.INTERNAL_SERVER_ERROR
         )
-
 
 @router.post("/v1/embeddings", response_model=None)
 async def embeddings(
@@ -856,6 +916,7 @@ async def process_multimodal_request(
     return JSONResponse(content=final_response.model_dump(exclude_none=True))
 
 
+
 async def process_text_request(
     handler: MLXLMHandler | MLXVLMHandler,
     request: ChatCompletionRequest,
@@ -990,11 +1051,9 @@ def format_final_response(
         request_id=request_id,
     )
 
-
 # =============================================================================
 # Responses API Handlers
 # =============================================================================
-
 
 def _normalize_responses_item(item: Any) -> dict[str, Any]:
     """Normalize TypedDict/BaseModel response item to a plain dictionary."""
@@ -1016,9 +1075,7 @@ def _serialize_responses_tool_output(output: Any) -> str:
         text_parts: list[str] = []
         for output_item in output:
             normalized = _normalize_responses_item(output_item)
-            if normalized.get("type") in {"input_text", "output_text", "text"} and normalized.get(
-                "text"
-            ):
+            if normalized.get("type") in {"input_text", "output_text", "text"} and normalized.get("text"):
                 text_parts.append(str(normalized["text"]))
         if text_parts:
             return "\n".join(text_parts)
@@ -1108,7 +1165,9 @@ def _convert_responses_tool_choice(tool_choice: Any) -> Any:
     return "auto"
 
 
-def convert_responses_request_to_chat_request(request: ResponsesRequest) -> ChatCompletionRequest:
+def convert_responses_request_to_chat_request(
+    request: ResponsesRequest
+) -> ChatCompletionRequest:
     """Convert a Responses request into a ChatCompletionRequest with full turn history."""
     chat_messages: list[Message] = []
     pending_tool_calls: list[ChatCompletionMessageToolCall] = []
@@ -1190,9 +1249,7 @@ def convert_responses_request_to_chat_request(request: ResponsesRequest) -> Chat
             if item_type in {"input_text", "text"}:
                 text = item.get("text")
                 if text:
-                    pending_user_parts.append(
-                        ChatCompletionContentPartText(type="text", text=str(text))
-                    )
+                    pending_user_parts.append(ChatCompletionContentPartText(type="text", text=str(text)))
             elif item_type in {"input_image", "image_url"} and item.get("image_url"):
                 pending_user_parts.append(
                     ChatCompletionContentPartImage(
@@ -1257,9 +1314,10 @@ def convert_responses_request_to_chat_request(request: ResponsesRequest) -> Chat
 
     return ChatCompletionRequest(**chat_request_payload)
 
-
 def format_final_responses_response(
-    response: str | dict[str, Any], request: ResponsesRequest, usage: UsageInfo | None = None
+    response: str | dict[str, Any],
+    request: ResponsesRequest,
+    usage: UsageInfo | None = None
 ) -> ResponsesResponse:
     """Format the final non-streaming response."""
     response_payload: dict[str, Any]
@@ -1334,7 +1392,7 @@ def format_final_responses_response(
             total_tokens=usage.total_tokens,
         )
 
-    return ResponsesResponse(
+    responses_response = ResponsesResponse(
         id=f"resp_{unique_id}",
         created_at=int(time.time()),
         status="completed",
@@ -1351,6 +1409,7 @@ def format_final_responses_response(
         text=request.text,
         reasoning=request.reasoning,
     )
+    return responses_response
 
 
 def refine_responses_request(
@@ -1390,11 +1449,10 @@ def refine_responses_request(
             handler, "default_max_tokens", "DEFAULT_MAX_TOKENS", _parse_env_int
         )
     if not request.model:
-        request.model = Config.TEXT_MODEL
+        request.model = getattr(handler, "model_id", Config.TEXT_MODEL)
     return request
 
-
-async def handle_responses_stream_response(  # noqa: C901
+async def handle_responses_stream_response(
     generator: AsyncGenerator[Any, None],
     request: ResponsesRequest,
     model: str | None = None,
@@ -1441,7 +1499,9 @@ async def handle_responses_stream_response(  # noqa: C901
         text_val = None
         if request.text:
             text_val = (
-                request.text.model_dump() if hasattr(request.text, "model_dump") else request.text
+                request.text.model_dump()
+                if hasattr(request.text, "model_dump")
+                else request.text
             )
         return {
             "id": resp_id,
@@ -1667,12 +1727,7 @@ async def handle_responses_stream_response(  # noqa: C901
                 {
                     "id": msg_item_id,
                     "content": [
-                        {
-                            "annotations": [],
-                            "text": full_text,
-                            "type": "output_text",
-                            "logprobs": None,
-                        }
+                        {"annotations": [], "text": full_text, "type": "output_text", "logprobs": None}
                     ],
                     "role": "assistant",
                     "status": "completed",
@@ -1713,9 +1768,9 @@ async def handle_responses_stream_response(  # noqa: C901
             f"data: {json.dumps({'response': final_response_obj, 'sequence_number': _next_seq(), 'type': 'response.completed'})}\n\n"
         )
 
-
 async def process_text_responses_request(
-    handler: MLXLMHandler, request: ResponsesRequest
+    handler: MLXLMHandler,
+    request: ResponsesRequest
 ) -> ResponsesResponse | StreamingResponse | JSONResponse:
     """Handle text-only Responses API requests."""
     refined_request = refine_responses_request(request, handler)
@@ -1770,9 +1825,12 @@ async def process_multimodal_responses_request(
     result = await handler.generate_multimodal_response(chat_request)
     response_data = result.get("response")
     usage = result.get("usage")
-    final_response = format_final_responses_response(response_data, refined_request, usage)
+    final_response = format_final_responses_response(
+        response_data,
+        refined_request,
+        usage
+    )
     return JSONResponse(content=final_response.model_dump(exclude_none=True))
-
 
 @router.post("/v1/responses", response_model=None)
 async def responses_endpoint(
