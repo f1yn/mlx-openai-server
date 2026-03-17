@@ -262,7 +262,7 @@ class MLXLMHandler:
         if messages[-1].get("role") != "user":
             return None
 
-        sentinel_messages = messages[:-1] + [{"role": "user", "content": "x"}]
+        sentinel_messages = [*messages[:-1], {"role": "user", "content": "x"}]
         try:
             sentinel_prompt = self.model.create_input_prompt(
                 sentinel_messages, dict(chat_template_kwargs)
@@ -273,7 +273,7 @@ class MLXLMHandler:
             return None
 
         common = 0
-        for a, b in zip(input_ids, sentinel_ids):
+        for a, b in zip(input_ids, sentinel_ids, strict=False):
             if a != b:
                 break
             common += 1
