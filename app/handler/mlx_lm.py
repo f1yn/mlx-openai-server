@@ -340,9 +340,7 @@ class MLXLMHandler:
                             checkpoint=True,
                         )
 
-                    logger.info(
-                        f"Non-trimmable cache: will checkpoint prefix at {boundary} tokens"
-                    )
+                    logger.info(f"Non-trimmable cache: will checkpoint prefix at {boundary} tokens")
 
         total_input_tokens = len(input_ids)
         total_remaining_tokens = len(rest_input_ids)
