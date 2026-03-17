@@ -101,7 +101,7 @@ class _FakeRegistry:
         return self._handlers[model_id]
 
 
-def _make_raw_request(registry: _FakeRegistry, handler: Any | None = None) -> Any:
+def _make_raw_request(registry: _FakeRegistry | None, handler: Any | None = None) -> Any:
     """Build a minimal request-like object for endpoint unit tests."""
 
     return types.SimpleNamespace(
@@ -545,12 +545,15 @@ async def test_responses_omitted_model_uses_backward_compatible_fallback_handler
         return JSONResponse(content={"ok": True})
 
     fallback_handler = types.SimpleNamespace(
-        handler_type="lm", _uses_model_sampling_defaults=True, **PER_MODEL_DEFAULTS_A
+        handler_type="lm",
+        model_id="alias-a",
+        _uses_model_sampling_defaults=True,
+        **PER_MODEL_DEFAULTS_A,
     )
     registry_handler = types.SimpleNamespace(
         handler_type="lm", _uses_model_sampling_defaults=True, **PER_MODEL_DEFAULTS_B
     )
-    registry = _FakeRegistry({"model-a": registry_handler})
+    registry = _FakeRegistry({"model-a": registry_handler, "alias-a": fallback_handler})
 
     monkeypatch.setattr(
         endpoints_module, "process_text_responses_request", _fake_process_text_responses_request
@@ -658,7 +661,8 @@ async def test_chat_completions_stream_omitted_model_reports_resolved_fallback_m
 
     assert isinstance(response, StreamingResponse)
     body_chunks = [
-        chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
     ]
 
     events: list[dict[str, Any]] = []
@@ -670,8 +674,9 @@ async def test_chat_completions_stream_omitted_model_reports_resolved_fallback_m
             continue
         events.append(json.loads(payload))
 
-    assert events[0]["model"] == "alias-a"
-    assert events[-1]["model"] == "alias-a"
+    model_values = [event["model"] for event in events if "model" in event]
+    assert model_values
+    assert set(model_values) == {"alias-a"}
 
 
 @pytest.mark.asyncio
@@ -761,19 +766,23 @@ async def test_responses_stream_omitted_model_reports_resolved_fallback_model_id
 
     assert isinstance(response, StreamingResponse)
     body_chunks = [
-        chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
     ]
 
-    events: list[dict[str, Any]] = []
+    events_by_type: dict[str, dict[str, Any]] = {}
     for item in "".join(body_chunks).split("\n\n"):
         for line in item.splitlines():
             if not line.startswith("data: "):
                 continue
             payload = line.removeprefix("data: ")
-            events.append(json.loads(payload))
+            event = json.loads(payload)
+            event_type = event.get("type")
+            if event_type in {"response.created", "response.completed"}:
+                events_by_type[event_type] = event
 
-    assert events[0]["response"]["model"] == "alias-a"
-    assert events[-1]["response"]["model"] == "alias-a"
+    assert events_by_type["response.created"]["response"]["model"] == "alias-a"
+    assert events_by_type["response.completed"]["response"]["model"] == "alias-a"
 
 
 @pytest.mark.asyncio
@@ -806,23 +815,35 @@ async def test_responses_explicit_legacy_alias_without_registry_entry_still_404s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "registry",
+    [None, _FakeRegistry({})],
+    ids=["no-registry", "empty-registry"],
+)
 async def test_responses_single_model_omitted_model_preserves_legacy_default_alias(
-    monkeypatch: pytest.MonkeyPatch,
+    registry: _FakeRegistry | None,
 ) -> None:
-    """Single-model omitted Responses requests should still report ``local-text-model``."""
+    """Single-model omitted Responses requests should still report ``local-text-model``.
+
+    The real single-model boot path does not currently attach
+    ``handler.model_id``. This test includes one anyway so the contract
+    stays pinned if a future handler or proxy refactor adds that field.
+    """
 
     endpoints_module = _load_endpoints_module()
 
     async def _fake_generate_text_response(_chat_request: Any) -> dict[str, Any]:
         return {"response": "hello", "usage": None}
 
+    # Guard against future single-model handler/proxy refactors that
+    # expose a concrete model_id while the API contract stays legacy.
     single_handler = types.SimpleNamespace(
         handler_type="lm",
+        model_id="actual-single-id",
         model_path="actual/model/path",
         debug=False,
         generate_text_response=_fake_generate_text_response,
     )
-    registry = _FakeRegistry({})
 
     request = ResponsesRequest(input="hello", model=None)
     response = await endpoints_module.responses_endpoint(
@@ -832,6 +853,54 @@ async def test_responses_single_model_omitted_model_preserves_legacy_default_ali
     assert isinstance(response, JSONResponse)
     payload = json.loads(response.body)
     assert payload["model"] == Config.TEXT_MODEL
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_single_model_omitted_model_preserves_legacy_default_alias() -> None:
+    """Streamed single-model omitted Responses requests should still report ``local-text-model``.
+
+    The real single-model boot path does not currently attach
+    ``handler.model_id``. This test includes one anyway so the stream
+    path stays aligned if that changes later.
+    """
+
+    endpoints_module = _load_endpoints_module()
+
+    async def _fake_generate_text_stream(_chat_request: Any) -> Any:
+        yield "hello"
+
+    single_handler = types.SimpleNamespace(
+        handler_type="lm",
+        model_id="actual-single-id",
+        model_path="actual/model/path",
+        debug=False,
+        generate_text_stream=_fake_generate_text_stream,
+    )
+
+    request = ResponsesRequest(input="hello", model=None, stream=True)
+    response = await endpoints_module.responses_endpoint(
+        request, _make_raw_request(None, handler=single_handler)
+    )
+
+    assert isinstance(response, StreamingResponse)
+    body_chunks = [
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
+    ]
+
+    events_by_type: dict[str, dict[str, Any]] = {}
+    for item in "".join(body_chunks).split("\n\n"):
+        for line in item.splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = line.removeprefix("data: ")
+            event = json.loads(payload)
+            event_type = event.get("type")
+            if event_type in {"response.created", "response.completed"}:
+                events_by_type[event_type] = event
+
+    assert events_by_type["response.created"]["response"]["model"] == Config.TEXT_MODEL
+    assert events_by_type["response.completed"]["response"]["model"] == Config.TEXT_MODEL
 
 
 @pytest.mark.asyncio
@@ -845,15 +914,15 @@ async def test_chat_completions_single_model_omitted_model_preserves_legacy_defa
 
     single_handler = types.SimpleNamespace(
         handler_type="lm",
+        model_id="actual-single-id",
         model_path="actual/model/path",
         debug=False,
         generate_text_response=_fake_generate_text_response,
     )
-    registry = _FakeRegistry({})
 
     request = ChatCompletionRequest(messages=[Message(role="user", content="hello")])
     response = await endpoints_module.chat_completions(
-        request, _make_raw_request(registry, handler=single_handler)
+        request, _make_raw_request(None, handler=single_handler)
     )
 
     assert isinstance(response, JSONResponse)
@@ -862,8 +931,9 @@ async def test_chat_completions_single_model_omitted_model_preserves_legacy_defa
 
 
 @pytest.mark.asyncio
-async def test_chat_completions_stream_single_model_omitted_model_preserves_legacy_default_alias(
-) -> None:
+async def test_chat_completions_stream_single_model_omitted_model_preserves_legacy_default_alias() -> (
+    None
+):
     """Streamed single-model omitted chat requests should still report ``local-text-model``."""
 
     endpoints_module = _load_endpoints_module()
@@ -873,20 +943,21 @@ async def test_chat_completions_stream_single_model_omitted_model_preserves_lega
 
     single_handler = types.SimpleNamespace(
         handler_type="lm",
+        model_id="actual-single-id",
         model_path="actual/model/path",
         debug=False,
         generate_text_stream=_fake_generate_text_stream,
     )
-    registry = _FakeRegistry({})
 
     request = ChatCompletionRequest(messages=[Message(role="user", content="hello")], stream=True)
     response = await endpoints_module.chat_completions(
-        request, _make_raw_request(registry, handler=single_handler)
+        request, _make_raw_request(None, handler=single_handler)
     )
 
     assert isinstance(response, StreamingResponse)
     body_chunks = [
-        chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator
+        chunk.decode() if isinstance(chunk, bytes) else chunk
+        async for chunk in response.body_iterator
     ]
 
     events: list[dict[str, Any]] = []
@@ -898,5 +969,6 @@ async def test_chat_completions_stream_single_model_omitted_model_preserves_lega
             continue
         events.append(json.loads(payload))
 
-    assert events[0]["model"] == Config.TEXT_MODEL
-    assert events[-1]["model"] == Config.TEXT_MODEL
+    model_values = [event["model"] for event in events if "model" in event]
+    assert model_values
+    assert set(model_values) == {Config.TEXT_MODEL}
