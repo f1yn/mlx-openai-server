@@ -150,6 +150,7 @@ mlx-openai-server launch \
 | `--temperature` | No | float | 1.0 | Default sampling temperature |
 | `--top-p` | No | float | 1.0 | Default nucleus sampling (top-p) probability |
 | `--top-k` | No | int | 20 | Default top-k sampling parameter |
+| `--repetition-penalty` | No | float | 1.0 | Default repetition penalty for token generation |
 | | | | | **Speculative decoding** (lm only) |
 | `--draft-model-path` | No | path | — | Path to draft model for speculative decoding |
 | `--num-draft-tokens` | No | int | 2 | Draft tokens per step |
