@@ -150,11 +150,12 @@ mlx-openai-server launch \
 | `--temperature` | No | float | 1.0 | Default sampling temperature |
 | `--top-p` | No | float | 1.0 | Default nucleus sampling (top-p) probability |
 | `--top-k` | No | int | 20 | Default top-k sampling parameter |
+| `--repetition-penalty` | No | float | 1.0 | Default repetition penalty for token generation |
 | | | | | **Speculative decoding** (lm only) |
 | `--draft-model-path` | No | path | — | Path to draft model for speculative decoding |
 | `--num-draft-tokens` | No | int | 2 | Draft tokens per step |
 | | | | | **Prompt cache** (lm only) |
-| `--prompt-cache-size` | No | int | 100 | Maximum number of prompt KV cache entries to store |
+| `--prompt-cache-size` | No | int | 10 | Maximum number of prompt KV cache entries to store |
 | `--max-bytes` | No | int | (unbounded) | Maximum total bytes retained by prompt KV caches before eviction |
 | | | | | **Advanced options** |
 | `--lora-paths` | No | string | — | Comma-separated LoRA adapter paths (image models) |
