@@ -119,6 +119,10 @@ class ModelRegistry:
             )
         return self._handlers[model_id]
 
+    def list_model_ids(self) -> list[str]:
+        """Return sorted list of all known model IDs (loaded + on-demand)."""
+        return sorted(set(self._handlers.keys()) | set(self._on_demand_configs.keys()))
+
     def list_models(self) -> list[dict[str, Any]]:
         """List all registered models with metadata.
 

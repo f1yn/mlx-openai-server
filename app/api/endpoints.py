@@ -144,12 +144,7 @@ async def _resolve_handler(
                 ) from exc
 
         # Model not found at all
-        available = (
-            ", ".join(
-                sorted(set(registry._handlers.keys()) | set(registry._on_demand_configs.keys()))
-            )
-            or "(none)"
-        )
+        available = ", ".join(registry.list_model_ids()) or "(none)"
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail={
