@@ -246,13 +246,20 @@ Clients can then use `"model": "my-local-model"` in their requests. If omitted, 
 
 ### Dynamic Model Swapping (On-Demand Loading)
 
+> **This feature is only available in multi-model mode** (`--config`). It is not supported with `--model-path` single-model launches.
+
 For large models you don't want to keep in memory permanently, set `on_demand: true` in the YAML config. The model will appear in `/v1/models` but won't be loaded until a request arrives. After the request completes and the model is idle, it is automatically unloaded.
 
 Only one on-demand model is loaded at a time — requesting a different on-demand model will unload the current one first.
 
 ```yaml
+# config.yaml
+server:
+  host: "0.0.0.0"
+  port: 8000
+
 models:
-  # Always loaded
+  # Always loaded at startup
   - model_path: mlx-community/GLM-4.7-Flash-8bit
     model_type: lm
     model_id: glm-4.7-flash
@@ -263,6 +270,10 @@ models:
     model_id: qwen3.5-32b
     on_demand: true
     on_demand_idle_timeout: 120
+```
+
+```bash
+mlx-openai-server launch --config config.yaml
 ```
 
 > **Note:** The first request to an on-demand model will be slower as the model needs to be loaded into memory. Subsequent requests (within the idle timeout) are served at normal speed.
