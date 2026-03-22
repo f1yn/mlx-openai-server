@@ -239,6 +239,22 @@ def _normalize_chat_response_model(
     request.model = Config.TEXT_MODEL
 
 
+def _normalize_request_model(raw_request: Request, request: Any, handler: Any) -> None:
+    """Replace the default ``Config.TEXT_MODEL`` placeholder with the handler's real name.
+
+    In single-handler mode, ``request.model`` defaults to
+    ``Config.TEXT_MODEL`` (``"local-text-model"``).  When a
+    ``--served-model-name`` is configured the handler's
+    ``model_path`` reflects the custom name, so we propagate it
+    into the request so that response payloads (including stream
+    chunks) carry the correct model identifier.
+    """
+    if request.model == Config.TEXT_MODEL and "model" not in getattr(request, "model_fields_set", set()):
+        registry = getattr(raw_request.app.state, "registry", None)
+        if registry is None:
+            request.model = getattr(handler, "model_path", request.model)
+
+
 def _should_use_legacy_chat_fallback(
     raw_request: Request,
     request: ChatCompletionRequest,
@@ -542,6 +558,7 @@ async def chat_completions(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         _normalize_chat_response_model(
             raw_request,
             request,
@@ -604,6 +621,7 @@ async def embeddings(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         if _get_handler_type(handler) != "embeddings":
             return JSONResponse(
                 content=create_error_response(
@@ -646,6 +664,7 @@ async def image_generations(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         # Check if the handler supports image generation
         if _get_handler_type(handler) != "image":
             return JSONResponse(
@@ -690,6 +709,7 @@ async def create_image_edit(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         # Check if the handler supports image editing
         if _get_handler_type(handler) != "image":
             return JSONResponse(
@@ -733,6 +753,7 @@ async def create_audio_transcriptions(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         if request.stream:
             # procoess the request before sending to the handler
             request_data = await handler.prepare_transcription_request(request)
@@ -1969,6 +1990,7 @@ async def responses_endpoint(
         )
 
     try:
+        _normalize_request_model(raw_request, request, handler)
         if _should_preserve_legacy_responses_model(raw_request, request, handler):
             # Single-model mode preserves the legacy alias even if a future
             # handler/proxy refactor adds a concrete ``model_id`` attribute,
